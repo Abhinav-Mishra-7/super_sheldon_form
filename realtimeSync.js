@@ -3,6 +3,8 @@ import fs from 'fs';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import { COLUMNS, docToRow } from './fieldMap.js';
+import http from 'node:http';
+
 
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   fs.writeFileSync(

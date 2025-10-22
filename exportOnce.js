@@ -4,6 +4,14 @@ import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import { COLUMNS, docToRow } from './fieldMap.js';
 
+if (process.env.GOOGLE_CREDENTIALS_BASE64) {
+  fs.writeFileSync(
+    "./credentials.json",
+    Buffer.from(process.env.GOOGLE_CREDENTIALS_BASE64, "base64").toString("utf8")
+  );
+}
+
+
 const {
   SPREADSHEET_ID,
   SHEET_NAME = "MongoSheet",

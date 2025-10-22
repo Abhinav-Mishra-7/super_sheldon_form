@@ -151,3 +151,10 @@ main().catch((e) => {
   console.error('❌ Startup error:', e);
   process.exit(1);
 });
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('✅ Running MongoDB → Google Sheets Sync Service');
+}).listen(process.env.PORT || 3000, () => {
+  console.log(`🌍 HTTP server running on port ${process.env.PORT || 3000}`);
+});

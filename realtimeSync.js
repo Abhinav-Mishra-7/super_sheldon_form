@@ -200,22 +200,17 @@ async function watchChanges() {
   });
 }
 
-// 🔟 Start Sync
 async function startSync() {
   try {
-    for (const doc of docs) {
-      await syncToInterakt(doc);
-    }
-
     if (client) await client.close().catch(() => {});
     client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
     await client.connect();
     col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
 
-    // Step 1: Fetch all existing documents
+    // ✅ Step 1: Fetch all existing documents
     const docs = await col.find({}).toArray();
 
-    // Step 2: Clear Google Sheet and write headers + all data
+    // ✅ Step 2: Clear sheet and write headers + all data
     const header = COLUMNS.map(c => c.header);
     const rows = docs.map(docToRow);
     const values = [header, ...rows];
@@ -234,10 +229,13 @@ async function startSync() {
 
     console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
 
-    // Step 3: Build index from sheet for live tracking
-    await buildIndexFromSheet();
+    // ✅ Step 3: Sync old data to Interakt
+    for (const doc of docs) {
+      await syncToInterakt(doc);
+    }
 
-    // Step 4: Start change stream
+    // ✅ Step 4: Build index and start watch
+    await buildIndexFromSheet();
     await watchChanges();
 
     console.log('✅ MongoDB connected and watching.');

@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import fs from 'fs';
+import http from 'node:http';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import { COLUMNS, docToRow } from './fieldMap.js';
-import http from 'node:http';
 
-
+/* ───────────── 1️⃣ Decode credentials if Base64 provided ───────────── */
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   fs.writeFileSync(
     './credentials.json',
@@ -13,6 +13,7 @@ if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   );
 }
 
+/* ───────────── 2️⃣ Environment Variables ───────────── */
 const {
   SPREADSHEET_ID,
   SHEET_NAME = 'Sheet1',
@@ -21,6 +22,7 @@ const {
   MONGO_COLLECTION,
 } = process.env;
 
+/* ───────────── 3️⃣ Google Sheets Setup ───────────── */
 const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf-8'));
 const auth = new google.auth.GoogleAuth({
   credentials,
@@ -31,9 +33,10 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: 'v4', auth });
 
-
-const client = new MongoClient(MONGO_URI);
-const idToRow = new Map(); 
+/* ───────────── 4️⃣ MongoDB Setup ───────────── */
+let client;
+let col;
+const idToRow = new Map(); // Maps _id → Row Number
 
 function rowRangeA1(rowNumber) {
   const toCol = (n) => {
@@ -48,6 +51,7 @@ function rowRangeA1(rowNumber) {
   return `${SHEET_NAME}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
 }
 
+/* ───────────── 5️⃣ Index existing sheet ───────────── */
 async function buildIndexFromSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -56,6 +60,7 @@ async function buildIndexFromSheet() {
   const rows = res.data.values ?? [];
   const idCol = COLUMNS.findIndex((c) => c.key === '_id');
   let rowNum = 2;
+  idToRow.clear();
   for (const row of rows) {
     const idCell = row[idCol] ?? '';
     if (idCell) idToRow.set(idCell, rowNum);
@@ -64,6 +69,7 @@ async function buildIndexFromSheet() {
   console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
 }
 
+/* ───────────── 6️⃣ CRUD Helpers ───────────── */
 async function appendRow(doc) {
   const row = docToRow(doc);
   const res = await sheets.spreadsheets.values.append({
@@ -73,7 +79,7 @@ async function appendRow(doc) {
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [row] },
   });
-  const updated = res.data.updates?.updatedRange; 
+  const updated = res.data.updates?.updatedRange;
   const m = updated?.match(/![A-Z]+(\d+):/);
   const rowNumber = m ? parseInt(m[1], 10) : null;
   if (rowNumber) idToRow.set(String(doc._id), rowNumber);
@@ -96,20 +102,9 @@ async function clearRow(rowNumber) {
   });
 }
 
-async function main() {
-  await client.connect();
-  const col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A1`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [COLUMNS.map((c) => c.header)] },
-  });
-
-  await buildIndexFromSheet();
-
-  console.log('👂 Watching MongoDB changes…');
+/* ───────────── 7️⃣ Watch MongoDB with Auto-Reconnect ───────────── */
+async function watchChanges() {
+  console.log('👂 Starting MongoDB change stream…');
   const stream = col.watch([], { fullDocument: 'updateLookup' });
 
   stream.on('change', async (change) => {
@@ -143,20 +138,53 @@ async function main() {
     }
   });
 
-  stream.on('error', (e) => {
-    console.error('Change stream error:', e);
-    process.exit(1);
+  stream.on('error', async (e) => {
+    console.error('⚠️ Change stream error:', e.message);
+    console.log('🔄 Reconnecting in 10s...');
+    setTimeout(startSync, 10000);
+  });
+
+  stream.on('close', () => {
+    console.warn('⚠️ Change stream closed. Reconnecting in 10s...');
+    setTimeout(startSync, 10000);
   });
 }
 
-main().catch((e) => {
-  console.error('❌ Startup error:', e);
-  process.exit(1);
-});
+/* ───────────── 8️⃣ Main Connection Logic ───────────── */
+async function startSync() {
+  try {
+    if (client) await client.close().catch(() => {});
+    client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
 
+    await client.connect();
+    col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
+
+    // Write headers if needed
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [COLUMNS.map((c) => c.header)] },
+    });
+
+    await buildIndexFromSheet();
+    await watchChanges();
+
+    console.log('✅ MongoDB connected & watching for changes');
+  } catch (err) {
+    console.error('❌ Startup/connection error:', err.message);
+    console.log('🔁 Retrying in 15 seconds...');
+    setTimeout(startSync, 15000);
+  }
+}
+
+/* ───────────── 9️⃣ Start Sync ───────────── */
+startSync();
+
+/* ───────────── 🔟 Keep Render Free Web Service Alive ───────────── */
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('✅ Running MongoDB → Google Sheets Sync Service');
-}).listen(process.env.PORT || 3000, () => {
+  res.end('✅ MongoDB → Google Sheets Sync is running');
+}).listen(process.env.PORT || 10000, () => {
   console.log(`🌍 HTTP server running on port ${process.env.PORT || 3000}`);
 });

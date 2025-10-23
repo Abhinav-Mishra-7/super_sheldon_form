@@ -1,4 +1,4 @@
-// --- sync.js ---
+// --- realtimeSync.js ---
 import 'dotenv/config';
 import fs from 'fs';
 import http from 'node:http';
@@ -7,7 +7,7 @@ import { google } from 'googleapis';
 import fetch from 'node-fetch';
 import { COLUMNS, docToRow } from './fieldMap.js';
 
-// 1️⃣ Decode credentials if Base64 provided
+// Decode Google credentials
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   fs.writeFileSync(
     './credentials.json',
@@ -15,7 +15,7 @@ if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   );
 }
 
-// 2️⃣ Environment Variables
+// Env variables
 const {
   SPREADSHEET_ID,
   SHEET_NAME = 'MongoSheet',
@@ -26,7 +26,7 @@ const {
   PORT = 3000,
 } = process.env;
 
-// 3️⃣ Google Sheets Setup
+// Google Sheets setup
 const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf-8'));
 const auth = new google.auth.GoogleAuth({
   credentials,
@@ -37,7 +37,7 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: 'v4', auth });
 
-// 4️⃣ MongoDB Setup
+// MongoDB setup
 let client;
 let col;
 const idToRow = new Map();
@@ -55,7 +55,7 @@ function rowRangeA1(rowNumber) {
   return `${SHEET_NAME}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
 }
 
-// 5️⃣ Index existing sheet
+// Build Sheet Index
 async function buildIndexFromSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -73,7 +73,7 @@ async function buildIndexFromSheet() {
   console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
 }
 
-// 6️⃣ Retry Wrapper
+// Retry wrapper
 async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   try {
     return await fn();
@@ -88,9 +88,9 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   }
 }
 
-// 7️⃣ Interakt Sync Function
+// Sync to Interakt
 async function syncToInterakt(doc) {
-  if (!doc.mobile) return; // guard clause
+  if (!doc.mobile) return;
   return await withRetry(async () => {
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
       method: 'POST',
@@ -116,7 +116,7 @@ async function syncToInterakt(doc) {
   }, 'syncToInterakt');
 }
 
-// 8️⃣ CRUD Functions
+// CRUD Sheet Functions
 async function appendRow(doc) {
   const row = docToRow(doc);
   await withRetry(async () => {
@@ -155,7 +155,7 @@ async function clearRow(rowNumber) {
     }), 'clearRow');
 }
 
-// 9️⃣ Change Stream
+// MongoDB Change Stream
 async function watchChanges() {
   console.log('👂 Watching MongoDB changes...');
   const stream = col.watch([], { fullDocument: 'updateLookup' });
@@ -200,6 +200,7 @@ async function watchChanges() {
   });
 }
 
+// Main startup
 async function startSync() {
   try {
     if (client) await client.close().catch(() => {});
@@ -207,10 +208,7 @@ async function startSync() {
     await client.connect();
     col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
 
-    // ✅ Step 1: Fetch all existing documents
     const docs = await col.find({}).toArray();
-
-    // ✅ Step 2: Clear sheet and write headers + all data
     const header = COLUMNS.map(c => c.header);
     const rows = docs.map(docToRow);
     const values = [header, ...rows];
@@ -229,12 +227,10 @@ async function startSync() {
 
     console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
 
-    // ✅ Step 3: Sync old data to Interakt
     for (const doc of docs) {
       await syncToInterakt(doc);
     }
 
-    // ✅ Step 4: Build index and start watch
     await buildIndexFromSheet();
     await watchChanges();
 
@@ -248,7 +244,7 @@ async function startSync() {
 
 startSync();
 
-// 🌐 Keep Alive
+// HTTP Keepalive
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('✅ MongoDB → Google Sheets & Interakt sync is running');

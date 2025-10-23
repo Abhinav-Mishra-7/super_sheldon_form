@@ -16,10 +16,11 @@ if (process.env.GOOGLE_CREDENTIALS_BASE64) {
 /* ───────────── 2️⃣ Environment Variables ───────────── */
 const {
   SPREADSHEET_ID,
-  SHEET_NAME = 'Sheet1',
+  SHEET_NAME = 'MongoSheet',
   MONGO_URI,
   MONGO_DB,
   MONGO_COLLECTION,
+  PORT = 3000,
 } = process.env;
 
 /* ───────────── 3️⃣ Google Sheets Setup ───────────── */
@@ -69,76 +70,92 @@ async function buildIndexFromSheet() {
   console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
 }
 
-/* ───────────── 6️⃣ CRUD Helpers ───────────── */
+/* ───────────── 6️⃣ Retry Helpers ───────────── */
+async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (retries <= 0) {
+      console.error(`❌ ${label} failed after retries:`, err.message);
+      return;
+    }
+    console.warn(`⚠️ ${label} failed: ${err.message}. Retrying in ${delay}ms...`);
+    await new Promise((res) => setTimeout(res, delay));
+    return withRetry(fn, label, retries - 1, delay * 2);
+  }
+}
+
+/* ───────────── 7️⃣ CRUD Helpers ───────────── */
 async function appendRow(doc) {
   const row = docToRow(doc);
-  const res = await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:A`,
-    valueInputOption: 'RAW',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [row] },
-  });
-  const updated = res.data.updates?.updatedRange;
-  const m = updated?.match(/![A-Z]+(\d+):/);
-  const rowNumber = m ? parseInt(m[1], 10) : null;
-  if (rowNumber) idToRow.set(String(doc._id), rowNumber);
+  await withRetry(async () => {
+    const res = await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:A`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [row] },
+    });
+    const updated = res.data.updates?.updatedRange;
+    const m = updated?.match(/![A-Z]+(\d+):/);
+    const rowNumber = m ? parseInt(m[1], 10) : null;
+    if (rowNumber) idToRow.set(String(doc._id), rowNumber);
+  }, 'appendRow');
 }
 
 async function updateRow(rowNumber, doc) {
   const row = docToRow(doc);
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: rowRangeA1(rowNumber),
-    valueInputOption: 'RAW',
-    requestBody: { values: [row] },
-  });
+  await withRetry(() =>
+    sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: rowRangeA1(rowNumber),
+      valueInputOption: 'RAW',
+      requestBody: { values: [row] },
+    }), 'updateRow');
 }
 
 async function clearRow(rowNumber) {
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SPREADSHEET_ID,
-    range: rowRangeA1(rowNumber),
-  });
+  await withRetry(() =>
+    sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: rowRangeA1(rowNumber),
+    }), 'clearRow');
 }
 
-/* ───────────── 7️⃣ Watch MongoDB with Auto-Reconnect ───────────── */
+/* ───────────── 8️⃣ Watch MongoDB with Auto-Reconnect ───────────── */
 async function watchChanges() {
-  console.log('👂 Starting MongoDB change stream…');
+  console.log('👂 Watching MongoDB changes...');
   const stream = col.watch([], { fullDocument: 'updateLookup' });
 
   stream.on('change', async (change) => {
     try {
+      const id = String(change.documentKey._id);
       if (change.operationType === 'insert') {
-        const doc = change.fullDocument;
-        console.log('➕ insert', doc._id);
-        await appendRow(doc);
+        console.log('➕ Insert:', id);
+        await appendRow(change.fullDocument);
       } else if (['update', 'replace'].includes(change.operationType)) {
-        const doc = change.fullDocument;
-        const id = String(doc._id);
         const rowNumber = idToRow.get(id);
         if (rowNumber) {
-          console.log('✏️ update', id, '→ row', rowNumber);
-          await updateRow(rowNumber, doc);
+          console.log('✏️ Update:', id, '→ row', rowNumber);
+          await updateRow(rowNumber, change.fullDocument);
         } else {
-          console.log('ℹ️ update (no index) → append', id);
-          await appendRow(doc);
+          console.log('ℹ️ Update without index → append:', id);
+          await appendRow(change.fullDocument);
         }
       } else if (change.operationType === 'delete') {
-        const id = String(change.documentKey._id);
         const rowNumber = idToRow.get(id);
-        console.log('🗑 delete', id, 'row', rowNumber);
         if (rowNumber) {
+          console.log('🗑 Delete:', id, 'row', rowNumber);
           await clearRow(rowNumber);
           idToRow.delete(id);
         }
       }
     } catch (e) {
-      console.error('Handler error:', e.message);
+      console.error('❌ Handler error:', e.message);
     }
   });
 
-  stream.on('error', async (e) => {
+  stream.on('error', (e) => {
     console.error('⚠️ Change stream error:', e.message);
     console.log('🔄 Reconnecting in 10s...');
     setTimeout(startSync, 10000);
@@ -150,29 +167,29 @@ async function watchChanges() {
   });
 }
 
-/* ───────────── 8️⃣ Main Connection Logic ───────────── */
+/* ───────────── 9️⃣ Main Sync Startup ───────────── */
 async function startSync() {
   try {
     if (client) await client.close().catch(() => {});
     client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
-
     await client.connect();
     col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
 
-    // Write headers if needed
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [COLUMNS.map((c) => c.header)] },
-    });
+    // Set headers
+    await withRetry(() =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [COLUMNS.map((c) => c.header)] },
+      }), 'setHeaders');
 
     await buildIndexFromSheet();
     await watchChanges();
 
-    console.log('✅ MongoDB connected & watching for changes');
+    console.log('✅ MongoDB connected and watching.');
   } catch (err) {
-    console.error('❌ Startup/connection error:', err.message);
+    console.error('❌ Sync start error:', err.message);
     console.log('🔁 Retrying in 15 seconds...');
     setTimeout(startSync, 15000);
   }
@@ -180,10 +197,10 @@ async function startSync() {
 
 startSync();
 
-/* ───────────── 🔟 Keep Render Free Web Service Alive ───────────── */
+/* 🔟 Keep Service Alive (for Render or Railway) */
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('✅ MongoDB → Google Sheets Sync is running');
-}).listen(process.env.PORT || 10000, () => {
-  console.log(`🌍 HTTP server running on port ${process.env.PORT || 3000}`);
+  res.end('✅ MongoDB → Google Sheets sync is running');
+}).listen(PORT, () => {
+  console.log(`🌍 HTTP server running on port ${PORT}`);
 });

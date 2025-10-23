@@ -99,12 +99,11 @@ async function syncToInterakt(doc) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        phoneNumber: `+91${doc.mobile}`,
-        countryCode: '+91',
+        phoneNumber: `${doc.mobile}`,
         userId: String(doc._id),
         traits: {
-          name: doc.fullName,
-          email: doc.email,
+          name: doc.fullName || 'Unnamed',
+          email: doc.email || undefined,
           grade: doc.grade,
           subject: doc.subject,
           pipeline_stage: 'New Lead'
@@ -204,6 +203,10 @@ async function watchChanges() {
 // 🔟 Start Sync
 async function startSync() {
   try {
+    for (const doc of docs) {
+      await syncToInterakt(doc);
+    }
+
     if (client) await client.close().catch(() => {});
     client = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
     await client.connect();

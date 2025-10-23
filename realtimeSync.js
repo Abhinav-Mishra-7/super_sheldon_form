@@ -1,11 +1,13 @@
+// --- sync.js ---
 import 'dotenv/config';
 import fs from 'fs';
 import http from 'node:http';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
+import fetch from 'node-fetch';
 import { COLUMNS, docToRow } from './fieldMap.js';
 
-/* ───────────── 1️⃣ Decode credentials if Base64 provided ───────────── */
+// 1️⃣ Decode credentials if Base64 provided
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   fs.writeFileSync(
     './credentials.json',
@@ -13,17 +15,18 @@ if (process.env.GOOGLE_CREDENTIALS_BASE64) {
   );
 }
 
-/* ───────────── 2️⃣ Environment Variables ───────────── */
+// 2️⃣ Environment Variables
 const {
   SPREADSHEET_ID,
   SHEET_NAME = 'MongoSheet',
   MONGO_URI,
   MONGO_DB,
   MONGO_COLLECTION,
+  INTERAKT_API_KEY,
   PORT = 3000,
 } = process.env;
 
-/* ───────────── 3️⃣ Google Sheets Setup ───────────── */
+// 3️⃣ Google Sheets Setup
 const credentials = JSON.parse(fs.readFileSync('./credentials.json', 'utf-8'));
 const auth = new google.auth.GoogleAuth({
   credentials,
@@ -34,10 +37,10 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: 'v4', auth });
 
-/* ───────────── 4️⃣ MongoDB Setup ───────────── */
+// 4️⃣ MongoDB Setup
 let client;
 let col;
-const idToRow = new Map(); // Maps _id → Row Number
+const idToRow = new Map();
 
 function rowRangeA1(rowNumber) {
   const toCol = (n) => {
@@ -52,7 +55,7 @@ function rowRangeA1(rowNumber) {
   return `${SHEET_NAME}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
 }
 
-/* ───────────── 5️⃣ Index existing sheet ───────────── */
+// 5️⃣ Index existing sheet
 async function buildIndexFromSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -70,7 +73,7 @@ async function buildIndexFromSheet() {
   console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
 }
 
-/* ───────────── 6️⃣ Retry Helpers ───────────── */
+// 6️⃣ Retry Wrapper
 async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   try {
     return await fn();
@@ -85,7 +88,36 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   }
 }
 
-/* ───────────── 7️⃣ CRUD Helpers ───────────── */
+// 7️⃣ Interakt Sync Function
+async function syncToInterakt(doc) {
+  if (!doc.mobile) return; // guard clause
+  return await withRetry(async () => {
+    const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${INTERAKT_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        phoneNumber: `+91${doc.mobile}`,
+        countryCode: '+91',
+        userId: String(doc._id),
+        traits: {
+          name: doc.fullName,
+          email: doc.email,
+          grade: doc.grade,
+          subject: doc.subject,
+          pipeline_stage: 'New Lead'
+        }
+      })
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.message || 'Interakt sync error');
+    console.log('✅ Synced to Interakt:', doc.fullName);
+  }, 'syncToInterakt');
+}
+
+// 8️⃣ CRUD Functions
 async function appendRow(doc) {
   const row = docToRow(doc);
   await withRetry(async () => {
@@ -101,6 +133,7 @@ async function appendRow(doc) {
     const rowNumber = m ? parseInt(m[1], 10) : null;
     if (rowNumber) idToRow.set(String(doc._id), rowNumber);
   }, 'appendRow');
+  await syncToInterakt(doc);
 }
 
 async function updateRow(rowNumber, doc) {
@@ -112,6 +145,7 @@ async function updateRow(rowNumber, doc) {
       valueInputOption: 'RAW',
       requestBody: { values: [row] },
     }), 'updateRow');
+  await syncToInterakt(doc);
 }
 
 async function clearRow(rowNumber) {
@@ -122,7 +156,7 @@ async function clearRow(rowNumber) {
     }), 'clearRow');
 }
 
-/* ───────────── 8️⃣ Watch MongoDB with Auto-Reconnect ───────────── */
+// 9️⃣ Change Stream
 async function watchChanges() {
   console.log('👂 Watching MongoDB changes...');
   const stream = col.watch([], { fullDocument: 'updateLookup' });
@@ -139,7 +173,7 @@ async function watchChanges() {
           console.log('✏️ Update:', id, '→ row', rowNumber);
           await updateRow(rowNumber, change.fullDocument);
         } else {
-          console.log('ℹ️ Update without index → append:', id);
+          console.log('ℹ️ Update no index → append:', id);
           await appendRow(change.fullDocument);
         }
       } else if (change.operationType === 'delete') {
@@ -167,7 +201,7 @@ async function watchChanges() {
   });
 }
 
-/* ───────────── 9️⃣ Main Sync Startup ───────────── */
+// 🔟 Start Sync
 async function startSync() {
   try {
     if (client) await client.close().catch(() => {});
@@ -175,16 +209,32 @@ async function startSync() {
     await client.connect();
     col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
 
-    // Set headers
-    await withRetry(() =>
-      sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [COLUMNS.map((c) => c.header)] },
-      }), 'setHeaders');
+    // Step 1: Fetch all existing documents
+    const docs = await col.find({}).toArray();
 
+    // Step 2: Clear Google Sheet and write headers + all data
+    const header = COLUMNS.map(c => c.header);
+    const rows = docs.map(docToRow);
+    const values = [header, ...rows];
+
+    await withRetry(() => sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:ZZ`,
+    }), 'clearSheet');
+
+    await withRetry(() => sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values },
+    }), 'initialExport');
+
+    console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
+
+    // Step 3: Build index from sheet for live tracking
     await buildIndexFromSheet();
+
+    // Step 4: Start change stream
     await watchChanges();
 
     console.log('✅ MongoDB connected and watching.');
@@ -197,10 +247,10 @@ async function startSync() {
 
 startSync();
 
-/* 🔟 Keep Service Alive (for Render or Railway) */
+// 🌐 Keep Alive
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('✅ MongoDB → Google Sheets sync is running');
+  res.end('✅ MongoDB → Google Sheets & Interakt sync is running');
 }).listen(PORT, () => {
-  console.log(`🌍 HTTP server running on port ${PORT}`);
+  console.log(`🌍 Server running on port ${PORT}`);
 });

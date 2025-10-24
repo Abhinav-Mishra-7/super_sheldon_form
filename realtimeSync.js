@@ -42,6 +42,7 @@ let client;
 let col;
 const idToRow = new Map();
 
+/* ────────────── Helper: Range Builder ────────────── */
 function rowRangeA1(rowNumber) {
   const toCol = (n) => {
     let s = '';
@@ -55,7 +56,7 @@ function rowRangeA1(rowNumber) {
   return `${SHEET_NAME}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
 }
 
-// Build Sheet Index
+/* ────────────── Helper: Build Sheet Index ────────────── */
 async function buildIndexFromSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -73,7 +74,7 @@ async function buildIndexFromSheet() {
   console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
 }
 
-// Retry wrapper
+/* ────────────── Helper: Retry Wrapper ────────────── */
 async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   try {
     return await fn();
@@ -88,38 +89,47 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
   }
 }
 
-// Sync to Interakt
+/* ────────────── Helper: Normalize Phone ────────────── */
+function normalizePhone(raw, defaultCC = '+91') {
+  if (!raw) return null;
+  const digits = String(raw).replace(/[^\d+]/g, '');
+  if (digits.startsWith('+')) return digits;
+  const noLeadZero = digits.replace(/^0+/, '');
+  return `${defaultCC}${noLeadZero}`;
+}
+
+/* ────────────── Sync to Interakt ────────────── */
 async function syncToInterakt(doc) {
-  if (!doc.mobile) {
-    console.warn(`⚠️ Skipping ${doc.fullName || 'Unnamed'} — no mobile number`);
+  const normalized = normalizePhone(doc.mobile);
+  if (!normalized) {
+    console.warn(`⚠️ Skipping ${doc.fullName || 'Unnamed'} — no valid mobile`);
     return;
   }
 
   return await withRetry(async () => {
     const payload = {
-      phoneNumber: `${doc.mobile}`,
+      phoneNumber: normalized,
       userId: String(doc._id),
       traits: {
         name: doc.fullName || 'Unnamed',
         email: doc.email || undefined,
-        grade: doc.grade,
-        subject: doc.subject,
+        grade: doc.grade || '',
+        subject: doc.subject || '',
         pipeline_stage: 'New Lead',
         lead_source: 'Google Sheet',
       },
-      tags: ['GoogleSheet']
+      tags: ['GoogleSheet'],
     };
 
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${INTERAKT_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
     });
 
-    // Log for visibility
     if (!res.ok) {
       const text = await res.text();
       console.error(`❌ Interakt rejected ${doc.fullName || doc._id}: ${res.status} ${res.statusText}`);
@@ -132,7 +142,7 @@ async function syncToInterakt(doc) {
   }, 'syncToInterakt');
 }
 
-// CRUD Sheet Functions
+/* ────────────── Google Sheets CRUD ────────────── */
 async function appendRow(doc) {
   const row = docToRow(doc);
   await withRetry(async () => {
@@ -171,7 +181,7 @@ async function clearRow(rowNumber) {
     }), 'clearRow');
 }
 
-// MongoDB Change Stream
+/* ────────────── Watch MongoDB Changes ────────────── */
 async function watchChanges() {
   console.log('👂 Watching MongoDB changes...');
   const stream = col.watch([], { fullDocument: 'updateLookup' });
@@ -216,7 +226,7 @@ async function watchChanges() {
   });
 }
 
-// Main startup
+/* ────────────── Main Sync Start ────────────── */
 async function startSync() {
   try {
     if (client) await client.close().catch(() => {});
@@ -225,27 +235,43 @@ async function startSync() {
     col = client.db(MONGO_DB).collection(MONGO_COLLECTION);
 
     const docs = await col.find({}).toArray();
-    const header = COLUMNS.map(c => c.header);
+    const header = COLUMNS.map((c) => c.header);
     const rows = docs.map(docToRow);
     const values = [header, ...rows];
 
-    await withRetry(() => sheets.spreadsheets.values.clear({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A:ZZ`,
-    }), 'clearSheet');
+    await withRetry(() =>
+      sheets.spreadsheets.values.clear({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A:ZZ`,
+      }), 'clearSheet'
+    );
 
-    await withRetry(() => sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A1`,
-      valueInputOption: 'RAW',
-      requestBody: { values },
-    }), 'initialExport');
+    await withRetry(() =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A1`,
+        valueInputOption: 'RAW',
+        requestBody: { values },
+      }), 'initialExport'
+    );
 
     console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
 
+    // --- Deduplicate and Sync ---
+    const seenPhones = new Set();
+    let sent = 0, skippedDup = 0, skippedNoPhone = 0;
+
     for (const doc of docs) {
+      const normalized = normalizePhone(doc.mobile);
+      if (!normalized) { skippedNoPhone++; continue; }
+      if (seenPhones.has(normalized)) { skippedDup++; continue; }
+      seenPhones.add(normalized);
+
       await syncToInterakt(doc);
+      sent++;
     }
+
+    console.log(`📊 Interakt sync summary → Sent: ${sent}, Duplicates skipped: ${skippedDup}, No-phone skipped: ${skippedNoPhone}`);
 
     await buildIndexFromSheet();
     await watchChanges();
@@ -260,7 +286,7 @@ async function startSync() {
 
 startSync();
 
-// HTTP Keepalive
+/* ────────────── HTTP Keepalive ────────────── */
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('✅ MongoDB → Google Sheets & Interakt sync is running');

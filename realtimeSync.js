@@ -107,14 +107,18 @@ async function syncToInterakt(doc) {
     phoneNumber: normalized,
     name: `${doc.fullName || 'Unnamed'}_${uniqueSuffix}`,
     email: doc.email || undefined,
-    customAttributes: {
-      grade: doc.grade || '',
-      subject: doc.subject || '',
+    traits: {
       pipeline_stage: 'New Lead',
       lead_source: 'Google Sheet'
     },
+    customAttributes: {
+      mongo_id: doc._id, 
+      grade: doc.grade || '',
+      subject: doc.subject || ''
+    },
     tags: ['GoogleSheet']
   };
+
 
   return await withRetry(async () => {
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', { 

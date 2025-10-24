@@ -258,21 +258,14 @@ async function startSync() {
 
     console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
 
-    // --- Deduplicate and Sync ---
-    const seenPhones = new Set();
-    let sent = 0, skippedDup = 0, skippedNoPhone = 0;
+    let sent = 0;
 
     for (const doc of docs) {
-      const normalized = normalizePhone(doc.mobile);
-      if (!normalized) { skippedNoPhone++; continue; }
-      if (seenPhones.has(normalized)) { skippedDup++; continue; }
-      seenPhones.add(normalized);
-
       await syncToInterakt(doc);
       sent++;
     }
 
-    console.log(`📊 Interakt sync summary → Sent: ${sent}, Duplicates skipped: ${skippedDup}, No-phone skipped: ${skippedNoPhone}`);
+    console.log(`📊 Interakt sync summary → Sent: ${sent} (All rows pushed to Interakt, no filters applied)`);
 
     await buildIndexFromSheet();
     await watchChanges();

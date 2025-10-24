@@ -100,27 +100,28 @@ function normalizePhone(raw, defaultCC = '+91') {
 
 /* ────────────── Sync to Interakt ────────────── */
 async function syncToInterakt(doc) {
-  const normalized = normalizePhone(doc.mobile);
-  if (!normalized) {
-    console.warn(`⚠️ Skipping ${doc.fullName || 'Unnamed'} — no valid mobile`);
-    return;
-  }
+  // Normalize phone for Interakt formatting (still keeps +91 if missing)
+  const raw = String(doc.mobile || '').trim();
+  const normalized = raw.startsWith('+') ? raw : `+91${raw.replace(/^0+/, '')}`;
+
+  // Build unique ID (even if phone duplicates exist)
+  const uniqueId = `${doc._id}_${Math.floor(Math.random() * 100000)}`;
+
+  const payload = {
+    phoneNumber: normalized || '+911111111111', // fallback number (Interakt requires something)
+    userId: uniqueId, // always unique, no overwrite
+    traits: {
+      name: doc.fullName || 'Unnamed',
+      email: doc.email || undefined,
+      grade: doc.grade || '',
+      subject: doc.subject || '',
+      pipeline_stage: 'New Lead',
+      lead_source: 'Google Sheet',
+    },
+    tags: ['GoogleSheet'],
+  };
 
   return await withRetry(async () => {
-    const payload = {
-      phoneNumber: normalized,
-      userId: String(doc._id),
-      traits: {
-        name: doc.fullName || 'Unnamed',
-        email: doc.email || undefined,
-        grade: doc.grade || '',
-        subject: doc.subject || '',
-        pipeline_stage: 'New Lead',
-        lead_source: 'Google Sheet',
-      },
-      tags: ['GoogleSheet'],
-    };
-
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
       method: 'POST',
       headers: {
@@ -132,13 +133,13 @@ async function syncToInterakt(doc) {
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`❌ Interakt rejected ${doc.fullName || doc._id}: ${res.status} ${res.statusText}`);
+      console.error(`❌ Failed to sync ${doc.fullName || 'Unnamed'}: ${res.status} ${res.statusText}`);
       console.error(`Payload:`, payload);
       console.error(`Response:`, text);
-      throw new Error(`Sync failed for ${doc.fullName || doc._id}`);
+      throw new Error(`Interakt rejected ${doc.fullName || doc._id}`);
     }
 
-    console.log(`✅ Synced to Interakt: ${doc.fullName || 'Unnamed'}`);
+    console.log(`✅ Synced to Interakt: ${doc.fullName || 'Unnamed'} (${normalized})`);
   }, 'syncToInterakt');
 }
 

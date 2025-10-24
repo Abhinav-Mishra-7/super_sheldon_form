@@ -111,13 +111,13 @@ async function syncToInterakt(doc) {
       grade: doc.grade || '',
       subject: doc.subject || '',
       pipeline_stage: 'New Lead',
-      lead_source: 'Google Sheet',
+      lead_source: 'Google Sheet'
     },
     tags: ['GoogleSheet']
   };
 
   return await withRetry(async () => {
-    const res = await fetch('https://api.interakt.ai/v1/contacts/', {
+    const res = await fetch('https://api.interakt.ai/v1/contacts/', { // ← remove “public”
       method: 'POST',
       headers: {
         'Authorization': `Basic ${INTERAKT_API_KEY}`,

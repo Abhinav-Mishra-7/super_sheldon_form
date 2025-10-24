@@ -106,13 +106,15 @@ async function syncToInterakt(doc) {
           email: doc.email || undefined,
           grade: doc.grade,
           subject: doc.subject,
-          pipeline_stage: 'New Lead'
-        }
+          pipeline_stage: 'New Lead',
+          lead_source: 'Google Sheet',       // ✅ Added lead source trait
+        },
+        tags: ['GoogleSheet']                // ✅ Added tag for filtering
       })
     });
     const result = await res.json();
     if (!res.ok) throw new Error(result.message || 'Interakt sync error');
-    console.log('✅ Synced to Interakt:', doc.fullName);
+    console.log(`✅ Synced to Interakt: ${doc.fullName} (Source: Google Sheet)`);
   }, 'syncToInterakt');
 }
 

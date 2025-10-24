@@ -90,31 +90,45 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
 
 // Sync to Interakt
 async function syncToInterakt(doc) {
-  if (!doc.mobile) return;
+  if (!doc.mobile) {
+    console.warn(`⚠️ Skipping ${doc.fullName || 'Unnamed'} — no mobile number`);
+    return;
+  }
+
   return await withRetry(async () => {
+    const payload = {
+      phoneNumber: `${doc.mobile}`,
+      userId: String(doc._id),
+      traits: {
+        name: doc.fullName || 'Unnamed',
+        email: doc.email || undefined,
+        grade: doc.grade,
+        subject: doc.subject,
+        pipeline_stage: 'New Lead',
+        lead_source: 'Google Sheet',
+      },
+      tags: ['GoogleSheet']
+    };
+
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${INTERAKT_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        phoneNumber: `${doc.mobile}`,
-        userId: String(doc._id),
-        traits: {
-          name: doc.fullName || 'Unnamed',
-          email: doc.email || undefined,
-          grade: doc.grade,
-          subject: doc.subject,
-          pipeline_stage: 'New Lead',
-          lead_source: 'Google Sheet',       // ✅ Added lead source trait
-        },
-        tags: ['GoogleSheet']                // ✅ Added tag for filtering
-      })
+      body: JSON.stringify(payload)
     });
-    const result = await res.json();
-    if (!res.ok) throw new Error(result.message || 'Interakt sync error');
-    console.log(`✅ Synced to Interakt: ${doc.fullName} (Source: Google Sheet)`);
+
+    // Log for visibility
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`❌ Interakt rejected ${doc.fullName || doc._id}: ${res.status} ${res.statusText}`);
+      console.error(`Payload:`, payload);
+      console.error(`Response:`, text);
+      throw new Error(`Sync failed for ${doc.fullName || doc._id}`);
+    }
+
+    console.log(`✅ Synced to Interakt: ${doc.fullName || 'Unnamed'}`);
   }, 'syncToInterakt');
 }
 

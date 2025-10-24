@@ -100,35 +100,30 @@ function normalizePhone(raw, defaultCC = '+91') {
 
 /* ────────────── Sync to Interakt ────────────── */
 async function syncToInterakt(doc) {
-  // Normalize phone for Interakt formatting (still keeps +91 if missing)
-  const raw = String(doc.mobile || '').trim();
-  const normalized = raw.startsWith('+') ? raw : `+91${raw.replace(/^0+/, '')}`;
-
-  // Build unique ID (even if phone duplicates exist)
-  const uniqueId = `${doc._id}_${Math.floor(Math.random() * 100000)}`;
+  const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const normalized = String(doc.mobile || '').trim() || '+911111111111';
 
   const payload = {
-    phoneNumber: normalized || '+911111111111', // fallback number (Interakt requires something)
-    userId: uniqueId, // always unique, no overwrite
-    traits: {
-      name: doc.fullName || 'Unnamed',
-      email: doc.email || undefined,
+    phoneNumber: normalized,
+    name: `${doc.fullName || 'Unnamed'}_${uniqueSuffix}`,
+    email: doc.email || undefined,
+    customAttributes: {
       grade: doc.grade || '',
       subject: doc.subject || '',
       pipeline_stage: 'New Lead',
       lead_source: 'Google Sheet',
     },
-    tags: ['GoogleSheet'],
+    tags: ['GoogleSheet']
   };
 
   return await withRetry(async () => {
-    const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
+    const res = await fetch('https://api.interakt.ai/v1/public/contacts/', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${INTERAKT_API_KEY}`,
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload)
     });
 
     if (!res.ok) {
@@ -139,7 +134,7 @@ async function syncToInterakt(doc) {
       throw new Error(`Interakt rejected ${doc.fullName || doc._id}`);
     }
 
-    console.log(`✅ Synced to Interakt: ${doc.fullName || 'Unnamed'} (${normalized})`);
+    console.log(`✅ Created Interakt lead: ${doc.fullName || 'Unnamed'} (${normalized})`);
   }, 'syncToInterakt');
 }
 

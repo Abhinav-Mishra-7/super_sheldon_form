@@ -100,46 +100,36 @@ function normalizePhone(raw, defaultCC = '+91') {
 
 /* ────────────── Sync to Interakt ────────────── */
 async function syncToInterakt(doc) {
-  const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  // const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const normalized = String(doc.mobile || '').trim() || '+911111111111';
+  const apiUrl = "https://api.interakt.ai/v1/public/track/users/";
 
   const payload = {
     phoneNumber: normalized,
-    name: `${doc.fullName || 'Unnamed'}_${uniqueSuffix}`,
-    email: doc.email || undefined,
+    userId: String(doc._id), 
     traits: {
-      pipeline_stage: 'New Lead',
-      lead_source: 'Google Sheet'
-    },
-    customAttributes: {
-      mongo_id: doc._id, 
+      name: doc.fullName || '',
+      email: doc.email || '',
       grade: doc.grade || '',
-      subject: doc.subject || ''
+      subject: doc.subject || ''    
     },
+    add_to_sales_cycle: true,                   
+    lead_status_crm: "New Lead" ,
     tags: ['GoogleSheet']
   };
 
 
-  return await withRetry(async () => {
-    const res = await fetch('https://api.interakt.ai/v1/public/track/users/', { 
-      method: 'POST',
+ try {
+    const response = await axios.post(apiUrl, payload, {
       headers: {
-        'Authorization': `Basic ${INTERAKT_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
+        "Content-Type": "application/json",
+        "Authorization": `Basic ${INTERAKT_API_KEY}`  
+      }
     });
-
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`❌ Failed to sync ${doc.fullName || 'Unnamed'}: ${res.status} ${res.statusText}`);
-      console.error(`Payload:`, payload);
-      console.error(`Response:`, text);
-      throw new Error(`Interakt rejected ${doc.fullName || doc._id}`);
-    }
-
-    console.log(`✅ Created Interakt lead: ${doc.fullName || 'Unnamed'} (${normalized})`);
-  }, 'syncToInterakt');
+    console.log(`Synced contact ${doc.phone} to Interakt as a New Lead.`);
+  } catch (err) {
+    console.error(`Failed to sync contact ${doc.phone}:`, err);
+  }
 }
 
 /* ────────────── Google Sheets CRUD ────────────── */

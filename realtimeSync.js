@@ -95,7 +95,7 @@ async function syncToInterakt(doc) {
     const res = await fetch('https://api.interakt.ai/v1/public/track/users/', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${INTERAKT_API_KEY}`,
+        'Authorization': `Basic ${INTERAKT_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({

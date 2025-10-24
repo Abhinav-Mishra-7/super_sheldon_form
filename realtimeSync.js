@@ -117,7 +117,7 @@ async function syncToInterakt(doc) {
   };
 
   return await withRetry(async () => {
-    const res = await fetch('https://api.interakt.ai/v1/public/contacts/', {
+    const res = await fetch('https://api.interakt.ai/v1/contacts/', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${INTERAKT_API_KEY}`,

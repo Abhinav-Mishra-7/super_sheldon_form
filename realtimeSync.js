@@ -91,14 +91,15 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
 async function syncToInterakt(recordData) {
   try {
     const payload = {
-      // Send all Airtable/Mongo data as traits
-      traits: {
-        ...recordData,
-      },
-      add_to_sales_cycle: true,
-      lead_status_crm: 'New Lead',
-      tags: [recordData.tableName || 'GoogleSheet'],
-    };
+    userId: String(recordData._id || recordData.id || Date.now()),
+    traits: {
+      ...recordData,
+    },
+    add_to_sales_cycle: true,
+    lead_status_crm: 'New Lead',
+    tags: [recordData.tableName || 'GoogleSheet'],
+  };
+
 
     await axios.post('https://api.interakt.ai/v1/public/track/users/', payload, {
       headers: {
@@ -259,15 +260,21 @@ app.post('/airtable-webhook', async (req, res) => {
     const payload = req.body;
     console.log('📩 Airtable webhook event received');
 
+    // Handle only "Demo Booking Form" table
     for (const event of payload.payloads || []) {
-      const tableId = event.tableId || 'UnknownTable';
+      const tableId = event.tableId || '';
+      if (tableId !== 'tbltM2TJ4yDQOpbdW') continue; 
+
       const newRecords = event.changedTables?.[0]?.createdRecords || [];
 
       for (const record of newRecords) {
         const recordData = record.fields || {};
+
+        // Add unique userId (Airtable record ID)
         await syncToInterakt({
           ...recordData,
-          tableName: tableId, // add table name tag
+          userId: record.id,
+          tableName: 'Demo Booking Form',
         });
       }
     }

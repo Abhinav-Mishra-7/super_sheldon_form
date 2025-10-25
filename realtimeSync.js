@@ -5,7 +5,7 @@ import express from 'express';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import axios from 'axios';
-import { COLUMNS, docToRow } from './fieldMap.js';
+import { COLUMNS, docToRow, AIRTABLE_COLUMNS, airtableRecordToRow } from './fieldMap.js';
 
 // 🔹 Decode Google credentials
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
@@ -18,7 +18,8 @@ if (process.env.GOOGLE_CREDENTIALS_BASE64) {
 // 🔹 Environment variables
 const {
   SPREADSHEET_ID,
-  SHEET_NAME = 'MongoSheet',
+  SHEET_NAME = 'Leads',
+  AIRTABLE_SHEET_NAME = 'Demo Booking Form',
   MONGO_URI,
   MONGO_DB,
   MONGO_COLLECTION,
@@ -43,7 +44,7 @@ let col;
 const idToRow = new Map();
 
 // ────────────────────────────── Helpers ────────────────────────────── //
-function rowRangeA1(rowNumber) {
+function rowRangeA1(sheetName, rowNumber) {
   const toCol = (n) => {
     let s = '';
     while (n > 0) {
@@ -53,7 +54,7 @@ function rowRangeA1(rowNumber) {
     }
     return s;
   };
-  return `${SHEET_NAME}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
+  return `${sheetName}!A${rowNumber}:${toCol(COLUMNS.length)}${rowNumber}`;
 }
 
 async function buildIndexFromSheet() {
@@ -70,7 +71,7 @@ async function buildIndexFromSheet() {
     if (idCell) idToRow.set(idCell, rowNum);
     rowNum++;
   }
-  console.log(`🔎 Indexed ${idToRow.size} rows from sheet`);
+  console.log(`🔎 Indexed ${idToRow.size} rows from ${SHEET_NAME} sheet`);
 }
 
 async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
@@ -88,18 +89,60 @@ async function withRetry(fn, label = 'operation', retries = 3, delay = 1000) {
 }
 
 // ────────────────────────────── Interakt Sync ────────────────────────────── //
-async function syncToInterakt(recordData) {
+async function syncToInterakt(recordData, source = 'GoogleSheet') {
   try {
-    const payload = {
-    userId: String(recordData._id || recordData.id || Date.now()),
-    traits: {
-      ...recordData,
-    },
-    add_to_sales_cycle: true,
-    lead_status_crm: 'New Lead',
-    tags: [recordData.tableName || 'GoogleSheet'],
-  };
+    // Extract and validate phone number
+    let phoneNumber = recordData.phoneNumber 
+      || recordData['Student Contact Number']
+      || recordData.contactNumber
+      || recordData.phone
+      || recordData.mobile
+      || recordData.studentContactNumber
+      || recordData['Phone Number'];
 
+    // Skip if no phone number
+    if (!phoneNumber) {
+      console.log(`⚠️ Skipping Interakt sync (${source}): No phone number for ${recordData._id || recordData.recordId}`);
+      return;
+    }
+
+    // Clean phone number
+    phoneNumber = String(phoneNumber).replace(/[^\d+]/g, '');
+    
+    // Add country code if missing
+    if (!phoneNumber.startsWith('+')) {
+      let countryCode = recordData.countryCode 
+        || recordData['Country Code']
+        || '+91';
+      
+      if (!countryCode.startsWith('+')) {
+        countryCode = `+${countryCode}`;
+      }
+      phoneNumber = `${countryCode}${phoneNumber}`;
+    }
+
+    // Validate phone number
+    const digitCount = phoneNumber.replace(/\D/g, '').length;
+    if (digitCount < 10) {
+      console.log(`⚠️ Skipping Interakt sync (${source}): Invalid phone ${phoneNumber}`);
+      return;
+    }
+
+    // Determine tag based on source
+    const tag = source === 'Airtable' ? 'Demo Booking Form' : 'Leads';
+
+    const payload = {
+      userId: String(recordData._id || recordData.recordId || `${source}-${Date.now()}`),
+      phoneNumber: phoneNumber,
+      traits: {
+        ...recordData,
+        phoneNumber: phoneNumber,
+        source: source,
+      },
+      add_to_sales_cycle: true,
+      lead_status_crm: 'New Lead',
+      tags: [tag],
+    };
 
     await axios.post('https://api.interakt.ai/v1/public/track/users/', payload, {
       headers: {
@@ -108,9 +151,10 @@ async function syncToInterakt(recordData) {
       },
     });
 
-    console.log(`✅ Synced record (${recordData.tableName || 'Mongo'}) to Interakt`);
+    console.log(`✅ Synced ${source} record to Interakt [${tag}]: ${phoneNumber}`);
   } catch (err) {
-    console.error('❌ Interakt sync error:', err.response?.data || err.message);
+    const recordId = recordData._id || recordData.recordId || 'unknown';
+    console.error(`❌ Interakt sync error (${source} - ${recordId}):`, err.response?.data || err.message);
   }
 }
 
@@ -130,7 +174,7 @@ async function appendRow(doc) {
     const rowNumber = m ? parseInt(m[1], 10) : null;
     if (rowNumber) idToRow.set(String(doc._id), rowNumber);
   }, 'appendRow');
-  await syncToInterakt(doc);
+  await syncToInterakt(doc, 'GoogleSheet');
 }
 
 async function updateRow(rowNumber, doc) {
@@ -138,18 +182,18 @@ async function updateRow(rowNumber, doc) {
   await withRetry(() =>
     sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: rowRangeA1(rowNumber),
+      range: rowRangeA1(SHEET_NAME, rowNumber),
       valueInputOption: 'RAW',
       requestBody: { values: [row] },
     }), 'updateRow');
-  await syncToInterakt(doc);
+  await syncToInterakt(doc, 'GoogleSheet');
 }
 
 async function clearRow(rowNumber) {
   await withRetry(() =>
     sheets.spreadsheets.values.clear({
       spreadsheetId: SPREADSHEET_ID,
-      range: rowRangeA1(rowNumber),
+      range: rowRangeA1(SHEET_NAME, rowNumber),
     }), 'clearRow');
 }
 
@@ -227,13 +271,13 @@ async function startSync() {
       }), 'initialExport'
     );
 
-    console.log(`✅ Exported ${docs.length} documents to Google Sheet`);
+    console.log(`✅ Exported ${docs.length} documents to ${SHEET_NAME} sheet`);
 
     for (const doc of docs) {
-      await syncToInterakt(doc);
+      await syncToInterakt(doc, 'GoogleSheet');
     }
 
-    console.log('📊 Initial Interakt sync done.');
+    console.log('📊 Initial GoogleSheet Interakt sync done.');
     await buildIndexFromSheet();
     await watchChanges();
   } catch (err) {
@@ -251,7 +295,7 @@ app.use(express.json());
 
 // Health check
 app.get('/', (req, res) => {
-  res.send('✅ MongoDB → Google Sheets & Airtable → Interakt sync running');
+  res.send('✅ MongoDB → Google Sheets [Leads] & Airtable [Demo Booking Form] → Interakt sync running');
 });
 
 // ────────────────────────────── Airtable Webhook ────────────────────────────── //
@@ -260,31 +304,45 @@ app.post('/airtable-webhook', async (req, res) => {
     const payload = req.body;
     console.log('📩 Airtable webhook event received');
 
-    // Handle only "Demo Booking Form" table
     for (const event of payload.payloads || []) {
       const tableId = event.tableId || '';
-      if (tableId !== 'tbltM2TJ4yDQOpbdW') continue; 
+      if (tableId !== 'tbltM2TJ4yDQOpbdW') continue;
 
       const newRecords = event.changedTables?.[0]?.createdRecords || [];
 
       for (const record of newRecords) {
-        const recordData = record.fields || {};
+        try {
+          const recordFields = record.fields || {};
+          
+          // ✅ ALL Airtable fields preserved with original names
+          const airtableRecord = {
+            recordId: record.id,
+            ...recordFields, // Everything from Airtable as-is
+            createdAt: new Date().toISOString(),
+          };
 
-        // Add unique userId (Airtable record ID)
-        await syncToInterakt({
-          ...recordData,
-          userId: record.id,
-          tableName: 'Demo Booking Form',
-        });
+          console.log(`📋 Airtable Record: ${record.id}`);
+
+          // Send to Interakt with original field names
+          await syncToInteraktAirtable(airtableRecord);
+
+          // Optionally: Save to Google Sheet if needed
+          // await appendAirtableRowToSheet(airtableRecord);
+
+          console.log(`✅ Processed: ${record.id}`);
+        } catch (recordErr) {
+          console.error(`❌ Error: ${record.id}:`, recordErr.message);
+        }
       }
     }
 
-    res.status(200).send('ok');
+    res.status(200).json({ success: true });
   } catch (err) {
-    console.error('❌ Airtable webhook error:', err.message);
-    res.status(500).send('error');
+    console.error('❌ Webhook error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`🌍 Server listening on port ${PORT}`);

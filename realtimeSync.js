@@ -5,7 +5,7 @@ import express from 'express';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import axios from 'axios';
-import { COLUMNS, docToRow, AIRTABLE_COLUMNS, airtableRecordToRow } from './fieldMap.js';
+import { COLUMNS, docToRow} from './fieldMap.js';
 
 // 🔹 Decode Google credentials
 if (process.env.GOOGLE_CREDENTIALS_BASE64) {
